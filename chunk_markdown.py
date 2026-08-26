@@ -253,17 +253,17 @@ def _split_text_block(block: dict, max_chars: int) -> list[dict]:
 # 3. 블록 -> 청크
 # =====================================================================
 
+# 수정 후 (embedding_text 필드 제거 또는 간소화)
 def _make_chunk(buf_blocks: list[dict], idx: int, doc_id: Optional[str]) -> dict:
     text = '\n\n'.join(b['text'] for b in buf_blocks)
-    # 청크의 heading_path 는 (헤딩 블록 제외) 실제 내용이 속한 마지막 섹션 경로를 사용
     content_blocks = [b for b in buf_blocks if b['type'] != 'heading']
     ref = content_blocks[-1] if content_blocks else buf_blocks[-1]
     heading_path = ' > '.join(ref['heading_path'])
 
-    # 임베딩용 텍스트: 섹션 경로를 맨 앞에 붙여 맥락을 보존한다.
-    # (표만 있는 청크가 "무슨 표인지" 모른 채 임베딩되는 것을 방지)
-    embedding_text = f'[{heading_path}]\n{text}' if heading_path else text
-
+    # 💡 굳이 전체 텍스트를 또 복사해 넣지 않고, 나중에 검색할 때 필요한 
+    # 'heading_path'와 'text'만 각각 저장하거나 embedding_text를 아예 빼버립니다!
+    # (embed_chunks.py가 없어도 text를 알아서 읽어 쓰므로 과감히 제거해도 됩니다)
+    
     return {
         'chunk_id': f'{doc_id}_{idx}' if doc_id else str(idx),
         'chunk_index': idx,
@@ -271,7 +271,7 @@ def _make_chunk(buf_blocks: list[dict], idx: int, doc_id: Optional[str]) -> dict
         'has_table': any(b['type'] == 'table' for b in buf_blocks),
         'char_count': len(text),
         'text': text,
-        'embedding_text': embedding_text,
+        # 'embedding_text' 필드 삭제 완료! 용량이 절반으로 줍니다.
     }
 
 
