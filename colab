@@ -1,0 +1,61 @@
+import json
+import os
+import pickle
+import numpy as np
+import gc
+from pathlib import Path
+from sentence_transformers import SentenceTransformer
+
+# 1. 설정 및 폴더 준비
+chunk_dir = Path('chunks')
+output_dir = Path('faiss_index')
+output_dir.mkdir(parents=True, exist_ok=True)
+
+# 2. 모델 로드 (GPU 강제 할당)
+print("🤖 AI 모델 로드 중...")
+model = SentenceTransformer('jhgan/ko-sroberta-multitask', device='cuda') 
+
+# 3. 데이터 읽기
+print("📂 청크 데이터 스캔 중...")
+all_chunks = []
+for file_path in chunk_dir.glob('**/*.jsonl'):
+    with open(file_path, 'r', encoding='utf-8-sig', errors='replace') as f:
+        for line in f:
+            if line.strip():
+                try:
+                    all_chunks.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+print(f"총 {len(all_chunks)}개의 청크를 발견했습니다.")
+
+# 4. 🔥 안전한 분할 임베딩 (10만 개 단위로 끊어서 저장)
+BLOCK_SIZE = 100000
+total_blocks = (len(all_chunks) + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+print(f"⚡ 총 {total_blocks}번으로 나누어 안전하게 임베딩을 시작합니다!")
+
+for b in range(total_blocks):
+    print(f"\n--- [ {b+1} / {total_blocks} 번째 블록 처리 중 ] ---")
+    
+    # 10만 개씩 자르기
+    start_idx = b * BLOCK_SIZE
+    end_idx = min((b + 1) * BLOCK_SIZE, len(all_chunks))
+    current_block = all_chunks[start_idx:end_idx]
+    
+    # 텍스트 추출 및 임베딩
+    texts = [chunk.get('text', '') for chunk in current_block]
+    embeddings = model.encode(texts, batch_size=128, show_progress_bar=True)
+    
+    # 즉시 파일로 저장 (블록 번호를 붙여서 여러 개로 저장)
+    np.save(output_dir / f'embeddings_block_{b}.npy', np.array(embeddings).astype('float32'))
+    with open(output_dir / f'metadata_block_{b}.pkl', 'wb') as f:
+        pickle.dump(current_block, f)
+        
+    print(f"💾 {b+1}번째 블록 저장 완료! 메모리를 청소합니다.")
+    
+    # ⭐ 램(RAM) 터짐 방지: 다 쓴 데이터 삭제 및 메모리 청소
+    del current_block, texts, embeddings
+    gc.collect()
+
+print("\n🎉✅ 1단계 완벽하게 완료! 모든 데이터가 안전하게 분할 저장되었습니다!")
