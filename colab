@@ -1,3 +1,18 @@
+import torch
+print("GPU 인식 여부:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("사용 중인 GPU 이름:", torch.cuda.get_device_name(0))
+else:
+    print("🚨 파이썬이 GPU를 찾지 못했습니다!")
+
+# 필수 패키지 설치
+!pip install sentence-transformers faiss-cpu
+
+!unzip /content/chunks_periodic.zip -d /content/chunks
+!unzip /content/chunks_holding.zip -d /content/chunks
+!unzip /content/chunks_major.zip -d /content/chunks
+!unzip /content/exchange_chunk.zip -d /content/chunks
+
 import json
 import os
 import pickle
@@ -13,7 +28,7 @@ output_dir.mkdir(parents=True, exist_ok=True)
 
 # 2. 모델 로드 (GPU 강제 할당)
 print("🤖 AI 모델 로드 중...")
-model = SentenceTransformer('jhgan/ko-sroberta-multitask', device='cuda') 
+model = SentenceTransformer('jhgan/ko-sroberta-multitask', device='cuda')
 
 # 3. 데이터 읽기
 print("📂 청크 데이터 스캔 중...")
@@ -37,25 +52,101 @@ print(f"⚡ 총 {total_blocks}번으로 나누어 안전하게 임베딩을 시�
 
 for b in range(total_blocks):
     print(f"\n--- [ {b+1} / {total_blocks} 번째 블록 처리 중 ] ---")
-    
+
     # 10만 개씩 자르기
     start_idx = b * BLOCK_SIZE
     end_idx = min((b + 1) * BLOCK_SIZE, len(all_chunks))
     current_block = all_chunks[start_idx:end_idx]
+
+    # 💡 [수정됨] 일반 text 대신 목차가 포함된 embedding_text를 우선적으로 가져옵니다!
+    # (만약 embedding_text가 없는 구버전 데이터라면 text를 가져오도록 안전 처리)
+    texts = [chunk.get('embedding_text', chunk.get('text', '')) for chunk in current_block]
     
-    # 텍스트 추출 및 임베딩
-    texts = [chunk.get('text', '') for chunk in current_block]
     embeddings = model.encode(texts, batch_size=128, show_progress_bar=True)
-    
+
     # 즉시 파일로 저장 (블록 번호를 붙여서 여러 개로 저장)
     np.save(output_dir / f'embeddings_block_{b}.npy', np.array(embeddings).astype('float32'))
     with open(output_dir / f'metadata_block_{b}.pkl', 'wb') as f:
         pickle.dump(current_block, f)
-        
+
     print(f"💾 {b+1}번째 블록 저장 완료! 메모리를 청소합니다.")
-    
+
     # ⭐ 램(RAM) 터짐 방지: 다 쓴 데이터 삭제 및 메모리 청소
     del current_block, texts, embeddings
     gc.collect()
 
 print("\n🎉✅ 1단계 완벽하게 완료! 모든 데이터가 안전하게 분할 저장되었습니다!")
+
+import faiss
+import numpy as np
+import pickle
+import glob
+import os
+from pathlib import Path
+
+# 1. 설정 및 파일 스캔
+output_dir = Path('faiss_index')
+faiss_index_path = output_dir / 'index.faiss'
+final_metadata_path = output_dir / 'metadata_final.pkl'
+
+# 저장된 블록 파일들을 순서대로 찾기
+npy_files = sorted(glob.glob(str(output_dir / 'embeddings_block_*.npy')),
+                   key=lambda x: int(os.path.basename(x).split('_')[2].split('.')[0]))
+pkl_files = sorted(glob.glob(str(output_dir / 'metadata_block_*.pkl')),
+                   key=lambda x: int(os.path.basename(x).split('_')[2].split('.')[0]))
+
+print(f"🔍 총 {len(npy_files)}개의 임베딩 블록을 발견했습니다. 조립을 시작합니다!")
+
+# 2. FAISS 인덱스 초기화 (첫 번째 파일의 차원 수 기준)
+first_block = np.load(npy_files[0])
+dimension = first_block.shape[1]
+index = faiss.IndexFlatL2(dimension)
+print(f"⚙️ FAISS 검색 엔진 초기화 완료 (차원 수: {dimension})")
+
+final_metadata = []
+
+# 3. 블록들을 하나씩 불러와서 메모리 안전하게 합치기
+for i, (npy_file, pkl_file) in enumerate(zip(npy_files, pkl_files)):
+    print(f"🧩 [{i+1}/{len(npy_files)}] 블록 조립 중...")
+
+    # 임베딩 추가
+    embeddings = np.load(npy_file)
+    index.add(embeddings)
+
+    # 메타데이터 병합
+    with open(pkl_file, 'rb') as f:
+        metadata = pickle.load(f)
+        final_metadata.extend(metadata)
+
+# 4. 찐 최종 파일 저장
+print("\n💾 찐 최종 FAISS 인덱스 및 통합 메타데이터 저장 중...")
+faiss.write_index(index, str(faiss_index_path))
+
+with open(final_metadata_path, 'wb') as f:
+    pickle.dump(final_metadata, f)
+
+print(f"🎉 2단계 완료! 완벽한 검색 엔진이 완성되었습니다!")
+print(f"👉 검색 엔진 파일: {faiss_index_path}")
+print(f"👉 통합 메타데이터: {final_metadata_path}")
+
+import zipfile
+from google.colab import files
+import os
+
+print("📦 찐 최종 파일만 골라서 압축을 시작합니다...")
+
+# 묶을 파일 경로 및 압축 파일 이름 설정
+index_file = 'faiss_index/index.faiss'
+metadata_file = 'faiss_index/metadata_final.pkl'
+zip_name = 'final_search_engine.zip'
+
+# 두 파일만 깔끔하게 zip 파일로 묶기
+with zipfile.ZipFile(zip_name, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
+    zipf.write(index_file, arcname='index.faiss')
+    zipf.write(metadata_file, arcname='metadata_final.pkl')
+
+print("📥 압축 완료! 내 컴퓨터로 자동 다운로드를 시작합니다!")
+print("※ 파일 용량에 따라 브라우저 다운로드 창이 뜰 때까지 1~2분 정도 걸릴 수 있습니다.")
+
+# 브라우저를 통해 다운로드 실행
+files.download(zip_name)
