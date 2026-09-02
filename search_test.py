@@ -4,6 +4,7 @@ import faiss
 import pickle
 import numpy as np
 import json
+import uuid
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 from datetime import datetime  # 💡 연도 계산을 위해 추가
@@ -25,8 +26,11 @@ lineage_path = 'doc_lineage.json'  # 정정공시 이력(족보) 파일 경로
 # 2. 모델, 인덱스, 메타데이터, 족보 데이터 로드
 print("🤖 AI 모델 및 데이터 로드 중...")
 model = SentenceTransformer('jhgan/ko-sroberta-multitask')
+
+print(f"📂 FAISS 인덱스 로드: {INDEX_PATH}")
 index = faiss.read_index(index_path)
 
+print(f"📂 메타데이터 로드: {METADATA_PATH}")
 with open(metadata_path, 'rb') as f:
     metadata = pickle.load(f)
 
@@ -69,26 +73,26 @@ def rewrite_query(original_query):
 
     headers = {
         'Authorization': f'Bearer {NAVER_API_KEY}',
+        'X-NCP-CLOVASTUDIO-REQUEST-ID': str(uuid.uuid4()),
         'Content-Type': 'application/json; charset=utf-8'
     }
-    
+
     payload = {
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": original_query}
         ],
-        "temperature": 0.0,  # 일관된 결과를 위해 0.0 설정
-        "maxTokens": 60      # 빠른 응답을 위해 토큰 제한
+        "temperature": 0.0,
+        "maxTokens": 60
     }
     
     try:
-        response = requests.post(NAVER_ENDPOINT, headers=headers, json=payload, timeout=5)
-        if response.status_code == 200:
-            result_data = response.json()
-            return result_data['result']['message']['content'].strip()
-    except Exception as e:
-        pass # 에러 발생 시 무시하고 원본 쿼리 반환
-        
+        res = requests.post(NAVER_ENDPOINT, headers=headers, json=payload, timeout=5)
+        if res.status_code == 200:
+            result = res.json()
+            return result.get('result', {}).get('message', {}).get('content', original_query).strip()
+    except Exception:
+        pass
     return original_query
 
 # 3. 비서 역할(LLM) 함수 만들기
@@ -97,9 +101,12 @@ def generate_answer(query, context_text):
     당신은 기업 공시를 분석하는 전문 AI 어시스턴트입니다. 
     반드시 제공된 [참고 자료]에 있는 정보만 사용하여 답변하세요.
     
-    [중요 규칙: 출력 포맷 (Strict Formatting)]
-    서술형 문장, 인사말, 분석적인 부연 설명("~덕분에 가능했습니다" 등)은 절대 사용하지 마세요. 반드시 아래의 보고서 요약 템플릿(개조식)에 맞춰 매우 간결하게 핵심 데이터만 작성하세요.
-    
+    [필수 작성 규칙]
+    1. 불필요한 서두와 결미(예: '안녕하세요', '죄송합니다만', '확인할 수 있는 내용은 다음과 같습니다')는 절대 출력하지 마세요.
+    2. 질문에 대한 핵심 수치와 팩트를 1~2문장의 깔끔한 완성형 문장으로 바로 제시하세요.
+    3. 숫자는 읽기 쉽게 단위(조, 억원 등)로 환산하여 표현해 주세요. (예: 333,605,938 백만원 -> 333조 6,059억 원)
+    4. 답변 바로 다음 줄에 아래 포맷으로 간결하게 근거를 명시하세요.
+
     [중요 규칙: 무관한 정보 처리 (Anti-Hallucination)]
     사용자가 묻는 핵심 주제(예: '투자 내용', '매출액' 등)와 일치하는 내용이 [참고 자료]에 없다면, 절대 다른 내용을 억지로 템플릿에 끼워 맞추지 마세요. 
     이 경우 오직 아래 문장만 출력하세요.
@@ -121,7 +128,7 @@ def generate_answer(query, context_text):
     1. 검색된 [참고 자료]에 과거 문서(정정 전)와 최신 문서(정정 후) 내용이 모두 포함되어 있다면, 최신 버전의 수치와 증감률을 우선적으로 반영하세요.
     2. 최신 문서(is_latest가 true인 문서)의 내용을 최종 사실로 간주하세요.
     """
-    
+    safe_context = context_text[:3500] if len(context_text) > 3500 else context_text
     user_prompt = f"질문: {query}\n\n[참고 자료]\n{context_text}"
     
     headers = {
