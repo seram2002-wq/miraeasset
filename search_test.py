@@ -46,33 +46,93 @@ except FileNotFoundError:
 
 print(f"✅ 준비 완료! (총 {index.ntotal}개의 벡터 데이터)")
 
-# ==========================================
-# 🔧 [수정 1] 동적 회사명 매칭 준비
-# 기존: corp_name[:2] not in search_query 방식 (앞 2글자만 비교) + 5개 기업만 하드코딩
-# 문제: "삼성전자"질문에 "삼성중공업/삼성생명"등도 다같이 통과됨
-#       "NAVER"처럼 하드코딩 리스트에 없는 회사는 필터 자체가 작동 안 함
-# 해결: metadata에 실제 존재하는 모든 corp_name을 기준으로 정확 매칭
-# ==========================================
+
 ALL_CORP_NAMES = sorted(
     set(chunk.get('corp_name', '') for chunk in metadata if chunk.get('corp_name')),
     key=len, reverse=True  # 긴 이름부터 비교해야 "삼성전자"가 "삼성"보다 먼저 매칭됨
 )
 
-# 영문/약칭 등 별칭 매핑 (필요할 때마다 계속 추가하면 됩니다)
-CORP_ALIASES = {
-    "네이버": "NAVER",
-    "삼성전자": "삼성전자",
-    # 예: "SK하닉": "SK하이닉스", "포스코": "POSCO홀딩스" 등
+STOCK_CODE_MAP = {
+    "000270": "기아","000660": "SK하이닉스","000720": "현대건설", "000810": "삼성화재해상보험",
+    "001430": "세아베스틸지주","004020": "현대제철",    "005380": "현대자동차", "005490": "POSCO홀딩스",
+    "005930": "삼성전자",    "006400": "삼성SDI",    "006800": "미래에셋증권",    "009150": "삼성전기",
+    "009830": "한화솔루션",    "010060": "OCI홀딩스",    "010120": "엘에스일렉트릭",    "010130": "고려아연", "010140": "삼성중공업",
+    "011070": "LG이노텍",    "011200": "HMM",    "012330": "현대모비스",    "012450": "한화에어로스페이스",
+    "017670": "SK텔레콤",    "028050": "삼성E&A",    "030200": "케이티",    "032640": "LG유플러스",
+    "032820": "우리기술",    "032830": "삼성생명",    "034020": "두산에너빌리티",    "035420": "NAVER",
+    "035720": "카카오",    "036570": "NC",    "037620": "미래에셋증권",    "041510": "에스엠",
+    "042660": "한화오션",   "042700": "한미반도체",    "047040": "대우건설",    "047810": "한국항공우주",
+    "051900": "LG생활건강",    "052690": "한전기술",    "053000": "우리금융지주",    "055550": "신한지주",
+    "064350": "현대로템",    "064400": "LG씨엔에스",    "068270": "셀트리온",    "079550": "LIG디펜스앤에어로스페이스",
+    "086280": "현대글로비스",    "086790": "하나금융지주",    "090430": "아모레퍼시픽",    "097950": "CJ제일제당",
+    "105560": "KB금융",    "122870": "와이지엔터테인먼트",    "128940": "한미약품",    "138040": "메리츠금융지주",
+    "139480": "이마트",    "196170": "알테오젠",    "207940": "삼성바이오로직스",    "214450": "파마리서치",
+    "247540": "에코프로비엠",    "259960": "크래프톤",    "267260": "HD현대일렉트릭",    "277810": "레인보우로보틱스",
+    "298040": "효성중공업",    "307950": "현대오토에버",    "316140": "우리금융지주",    "329180": "HD현대중공업",
+    "336260": "두산퓨얼셀",    "347850": "디앤디파마텍",    "352820": "하이브",    "373220": "LG에너지솔루션",
+    "454910": "두산로보틱스",    "462870": "시프트업", "035900":"JYP Ent"
 }
 
+ENGLISH_NAME_MAP = {
+    "alteogen inc.": "알테오젠","amorepacific corp.": "아모레퍼시픽", "celltrion, inc.": "셀트리온", "cj cheiljedang corp.": "CJ제일제당",
+    "d&d pharmatech inc.": "디앤디파마텍", "daewoo engineering & construction co.,ltd": "대우건설",
+    "doosan enerbility co., ltd.": "두산에너빌리티", "doosan fuel cell co., ltd.": "두산퓨얼셀", "doosan robotics inc.": "두산로보틱스", "e-mart inc.": "이마트",
+    "ecopro bm co.,ltd.": "에코프로비엠", "hana financial group inc.": "하나금융지주", "hanmi pharm. co., ltd.": "한미약품", "hanmi semiconductor co., ltd.": "한미반도체",
+    "hanwha aerospace co., ltd.": "한화에어로스페이스", "hanwha ocean co., ltd.": "한화오션", "hanwha solutions corporation": "한화솔루션",    "hd hyundai electric co.,ltd": "HD현대일렉트릭",
+    "hd hyundai heavy industries co.,ltd.": "HD현대중공업", "hmm co.,ltd": "HMM", "hybe co., ltd.": "하이브", "hyosung heavy industries corporation": "효성중공업",
+    "hyundai autoever corporation.": "현대오토에버", "hyundai engineering & construction co.,ltd": "현대건설","hyundai glovis co., ltd.": "현대글로비스",    "hyundai mobis co.,ltd": "현대모비스",
+    "hyundai motor co": "현대자동차","hyundai steel company": "현대제철","hyundai-rotem co.": "현대로템","kakao corp.": "카카오","kb financial group inc.": "KB금융", "kepco engineering & construction company, inc": "한전기술",
+    "kia corporation": "기아","korea aerospace industries, ltd.": "한국항공우주", "korea zinc inc": "고려아연", "krafton, inc.": "크래프톤",
+    "kt corporation": "케이티",  "lg cns co., ltd.": "LG씨엔에스", "lg energy solution, ltd.": "LG에너지솔루션", "lg h&h co., ltd.": "LG생활건강",
+    "lg innotek co., ltd.": "LG이노텍", "lg uplus corp": "LG유플러스", "lig defense&aerospace co., ltd.": "LIG디펜스앤에어로스페이스",    "ls electric co., ltd": "엘에스일렉트릭",
+    "meritz financial group inc.": "메리츠금융지주",  "mirae asset securities co.,ltd.": "미래에셋증권",
+    "naver corporation": "NAVER",  "nc corporation": "NC", "oci holdings company ltd.": "OCI홀딩스", "pharmaresearch co., ltd.": "파마리서치",
+    "posco holdings inc.": "POSCO홀딩스",  "rainbow robotics": "레인보우로보틱스",  "samsung biologics co.,ltd.": "삼성바이오로직스",  "samsung e&a co.,ltd": "삼성E&A",
+    "samsung electro-mechanics co.,ltd": "삼성전기",    "samsung electronics co,.ltd": "삼성전자",
+    "samsung fire & marine insurance co.,ltd": "삼성화재해상보험",    "samsung heavy industries co.,ltd": "삼성중공업",
+    "samsung life insurance co., ltd": "삼성생명", "samsung sdi co.,ltd": "삼성SDI", "seah besteel holdings corporation": "세아베스틸지주",    "shift up corporation.": "시프트업",
+    "shinhan financial group co.,ltd": "신한지주",  "sk hynix inc.": "SK하이닉스", "sk telecom co.,ltd": "SK텔레콤", "sm entertainment co., ltd.": "에스엠",
+    "woori financial group inc.": "우리금융지주",    "woori technology, incorporation": "우리기술",   "yg entertainment inc.": "와이지엔터테인먼트"
+}
+
+# 통용 약칭 / 한글 음차는 공식 데이터가 없어 사람이 관찰하며 계속 보강해야 하는 영역.
+# 여기에 계속 추가해나가면 됨 (런타임 속도에는 영향 없음 — 그냥 dict 항목 추가일 뿐)
+CORP_ALIASES = {
+    "네이버": "NAVER",
+    "포스코": "POSCO홀딩스",
+    "하이닉스": "SK하이닉스",
+    "에스케이하이닉스": "SK하이닉스",
+    "엘지에너지솔루션": "LG에너지솔루션",
+    "기아자동차": "기아",
+
+    # 계속 추가...
+}
+
+
 def extract_target_corp(query, corp_names, aliases):
-    """질문 문장에서 실제 metadata에 존재하는 기업명을 찾아 반환합니다."""
+    """질문 문장에서 실제 metadata에 존재하는 기업명을 찾아 반환합니다.
+    지원 표기: DART 공식 사명 > 종목코드 > 영문명 > 통용 약칭/한글음차 순으로 확인"""
+    # ① DART 공식 사명 (가장 정확 - metadata의 corp_name과 직접 일치)
     for c in corp_names:
         if c and c in query:
             return c
+
+    # ② 🔧 [수정 25] 종목코드 (6자리 숫자) - 정규식으로 추출 후 dict 조회
+    code_match = re.search(r'\b(\d{6})\b', query)
+    if code_match and code_match.group(1) in STOCK_CODE_MAP:
+        return STOCK_CODE_MAP[code_match.group(1)]
+
+    # ③ 🔧 [수정 25] 영문명 - 대소문자 무시하고 부분 일치
+    query_lower = query.lower()
+    for eng_name, kor_name in ENGLISH_NAME_MAP.items():
+        if eng_name in query_lower:
+            return kor_name
+
+    # ④ 통용 약칭 / 한글 음차
     for alias, real in aliases.items():
         if alias in query:
             return real
+
     return None
 
 # ==========================================
@@ -139,10 +199,64 @@ def find_target_doc_ids(target_corp, target_year, target_report_type):
     return matched
 
 
+# ==========================================
+# 🔧 [수정 23] 신규 추가 - 자주 나오는 주제는 규칙으로 섹션을 고정
+# 문제: "투자 계획" 질문은 항상 "원재료 및 생산설비"(설비투자)와
+#      "주요계약 및 연구개발활동"(R&D) 두 섹션을 같이 봐야 완전한 답이 되는데,
+#      LLM에게 "관련 섹션을 최대 3개 고르라"고 맡기면 매번 판단이 조금씩 달라져서
+#      (비결정적) 둘 중 하나만 고르고 하나는 빠뜨리는 경우가 반복됨
+# 해결: "투자"처럼 이미 정답 패턴이 확인된 반복 주제는 LLM 호출 없이
+#      규칙으로 관련 섹션을 전부 확정. 이러면 매번 100% 동일하고 빠짐없이 잡힘.
+#      규칙에 없는 새로운/애매한 주제만 기존처럼 LLM에게 맡김 (select_relevant_sections)
+# ==========================================
+TOPIC_SECTION_HINTS = {
+    "매출": ["매출 및 수주", "매출실적", "매출 실적"],
+    "연구개발": ["주요계약 및 연구개발", "연구개발실적", "연구개발"],
+    "위험": ["위험관리", "파생거래"],
+}
+
+# 🔧 [수정 24] "투자"는 문맥에 따라 완전히 다른 두 가지를 의미할 수 있어 별도 분기 처리
+#     ① 설비투자/CAPEX (예: "투자 계획", "시설투자 얼마나") -> "II. 사업의 내용" 하위 섹션
+#     ② 지분투자/M&A (예: "지분 인수", "출자", "종속기업 투자") -> 재무제표의 지분투자 섹션
+#     문제: "투자"를 무조건 ①로만 고정하면, 진짜 ②를 묻는 질문("레인보우로보틱스 지분
+#          얼마나 인수했어?")에도 엉뚱하게 설비투자/연구개발 섹션을 강제로 들이밀게 됨
+#     해결: 질문에 "지분/인수/M&A/출자/합병/매각/종속기업/관계기업" 같은 명시적 신호가
+#          있을 때만 ②로 분기하고, 그 외(일반적인 "투자 계획" 등)는 기존처럼 ①로 처리
+EQUITY_INVESTMENT_SIGNAL_KEYWORDS = ["지분", "인수", "M&A", "합병", "출자", "종속기업", "관계기업", "매각", "지분율"]
+CAPEX_RND_SECTION_KEYWORDS = ["원재료 및 생산설비", "생산설비", "설비투자", "시설투자", "주요계약 및 연구개발", "연구개발"]
+EQUITY_SECTION_KEYWORDS = ["타법인 출자", "종속기업", "관계기업", "지분법", "특수관계자", "연결대상"]
+
+
+def rule_based_section_hint(query, available_sections):
+    """알려진 주제 키워드가 질문에 있으면, 관련 섹션을 규칙으로 바로 확정합니다."""
+    if "투자" in query:
+        if any(kw in query for kw in EQUITY_INVESTMENT_SIGNAL_KEYWORDS):
+            # ② 지분투자/M&A 문맥
+            matched = {s for s in available_sections for kw in EQUITY_SECTION_KEYWORDS if kw in s}
+        else:
+            # ① 설비투자/CAPEX/R&D 문맥 (기본값)
+            matched = {s for s in available_sections for kw in CAPEX_RND_SECTION_KEYWORDS if kw in s}
+        if matched:
+            return list(matched)
+
+    for topic, keywords in TOPIC_SECTION_HINTS.items():
+        if topic in query:
+            matched = {s for s in available_sections for kw in keywords if kw in s}
+            if matched:
+                return list(matched)
+    return None
+
+
 def select_relevant_sections(query, available_sections):
     """문서의 목차 리스트 중, 질문에 답하기 위해 봐야 할 섹션을 LLM으로 선택합니다."""
     if not available_sections:
         return []
+
+    # 🔧 [수정 19] 후보가 1개뿐이면 고를 필요가 없으므로 LLM 호출 없이 바로 반환
+    #     (여러 섹션 중 '의미적으로 골라야' 하는 경우에만 LLM이 필요함 — 이게 바로
+    #      규칙으로 못 푸는 진짜 중의성 지점이고, 후보가 하나면 애초에 중의성이 없음)
+    if len(available_sections) == 1:
+        return list(available_sections)
 
     sections_list_str = "\n".join(f"- {s}" for s in sorted(available_sections))
     system_prompt = f"""당신은 기업 공시 보고서의 목차 중 질문과 가장 관련 있는 섹션을 고르는 어시스턴트입니다.
@@ -150,6 +264,17 @@ def select_relevant_sections(query, available_sections):
 {sections_list_str}
 
 사용자 질문에 답하기 위해 반드시 확인해야 하는 섹션을 목록에서 최대 3개까지 고르세요.
+
+[헷갈리기 쉬운 용어 구분 - 반드시 참고하세요]
+공시 보고서에서 같은 단어가 서로 다른 섹션에서 다른 의미로 쓰이는 경우가 많습니다. 질문의 진짜 의도에 맞는 섹션만 고르세요.
+- "투자 계획/내역/현황" (설비투자, 시설투자, CAPEX, 연구개발 관련 질문)
+  -> "II. 사업의 내용" 하위의 "원재료 및 생산설비", "주요계약 및 연구개발활동" 같은 섹션을 우선하세요.
+  -> "III. 재무에 관한 사항"의 "증권의 발행을 통한 자금조달", "지분증권/채무증권 발행실적" 같은
+     재무조달(파이낸싱) 섹션은 질문이 명시적으로 "자금조달", "채권 발행", "증자"를 묻지 않는 한 고르지 마세요.
+     (이건 회사가 어떻게 '돈을 마련했는지'에 대한 내용이지, 회사가 '어디에 투자했는지'가 아닙니다.)
+- "매출/실적" 질문 -> "매출 및 수주상황" 섹션을 우선하고, 재무제표 주석의 세부 계정과목은 후순위로.
+- "지분 투자/M&A/인수합병" 질문일 때만 재무제표 주석의 "타법인 출자", "종속기업 투자" 같은 섹션을 고르세요.
+
 목록에 있는 텍스트를 정확히 그대로 복사해서, 콤마(,)로 구분해 출력하세요. 그 외 부연 설명은 절대 추가하지 마세요."""
 
     headers = {
@@ -197,10 +322,19 @@ def extract_target_year(query):
 
 # 🔧 [수정 8] 신규 추가 - 질문에 포함된 보고서 종류(분기/반기/사업보고서) 추출
 # 예: "2026년 1분기 분기보고서" -> "분기보고서"로 매칭되도록
+# 🔧 [수정 20] 분기 → 문서종류 매핑을 실제 공시 제출 구조에 맞게 수정
+#     문제: "2분기"를 "분기보고서"로 매핑했었는데, 한국 상장사는 2분기 전용 분기보고서를
+#          제출하지 않음. 실제로는 아래처럼 제출됨:
+#            1분기 -> 분기보고서 (1~3월)
+#            2분기 -> 반기보고서 (1~6월 누적, "분기보고서"가 아님!)
+#            3분기 -> 분기보고서 (1~9월 누적)
+#            4분기 -> 별도 문서 없음, 사업보고서(연간)에 포함됨
+#     기존 매핑대로면 "2분기" 질문이 실제 정답 문서(반기보고서)를 검색 대상에서
+#     제외시켜버려서, 엉뚱하게 1분기/3분기 자료로 답변하는 사고가 발생했음
 REPORT_TYPE_KEYWORDS = {
-    "분기보고서": ["분기보고서", "1분기", "2분기", "3분기", "4분기", "분기 실적"],
-    "반기보고서": ["반기보고서", "반기 실적"],
-    "사업보고서": ["사업보고서", "연간 실적", "연간보고서"],
+    "분기보고서": ["분기보고서", "1분기", "3분기", "분기 실적"],
+    "반기보고서": ["반기보고서", "2분기", "반기 실적", "상반기"],
+    "사업보고서": ["사업보고서", "4분기", "연간 실적", "연간보고서"],
 }
 
 def extract_target_report_type(query):
@@ -211,11 +345,27 @@ def extract_target_report_type(query):
 
 # ==========================================
 # 💡 [신규 추가] 질문 재작성 (Query Rewriting) 함수
+# 🔧 [수정 18] 규칙 기반 선처리 추가
+#     문제: 기존엔 상대시점 표현이 있든 없든 매 질문마다 LLM API를 호출했음
+#          ("2026년 1분기 보고서"처럼 이미 절대연도인 질문도 예외 없이 호출)
+#     해결: "올해/작년/내년" 등 상대시점 키워드가 실제로 있는지 정규식으로 먼저 확인.
+#          없으면 LLM 호출 없이 원본 질문을 그대로 반환 -> 불필요한 지연/비용 제거
+#          있을 때만 LLM을 호출해 정확한 연도 계산(윤년 등 특수 로직 없이 문맥 이해 필요한 부분)을 맡김
 # ==========================================
+RELATIVE_TIME_KEYWORDS = ["올해", "이번 년도", "이번년도", "작년", "전년도", "재작년", "내년"]
+
+def has_relative_time_expression(query):
+    return any(kw in query for kw in RELATIVE_TIME_KEYWORDS)
+
+
 def rewrite_query(original_query):
     """
     사용자 질문에 포함된 상대적 시간(올해, 작년 등)을 절대 연도로 변환합니다.
     """
+    # 🔧 [수정 18] 규칙으로 먼저 판단: 상대시점 표현이 없으면 LLM 호출 없이 바로 반환
+    if not has_relative_time_expression(original_query):
+        return original_query
+
     current_year = datetime.now().year
     
     system_prompt = f"""
@@ -296,6 +446,16 @@ def generate_answer(query, context_text):
     [중요 규칙: 정정공시 처리]
     1. 검색된 [참고 자료]에 과거 문서(정정 전)와 최신 문서(정정 후) 내용이 모두 포함되어 있다면, 최신 버전의 수치와 증감률을 우선적으로 반영하세요.
     2. 최신 문서(is_latest가 true인 문서)의 내용을 최종 사실로 간주하세요.
+
+    [중요 규칙: 누적치 vs 단일분기 구분]
+    🔧 [수정 21] 신규 추가
+    한국 공시 보고서의 매출/이익 수치는 대부분 "누적 기준"으로 표기됩니다.
+    - 반기보고서의 수치 = 1~6월 누적 (2분기 단독 실적이 아님)
+    - 3분기보고서의 수치 = 1~9월 누적 (3분기 단독 실적이 아님)
+    사용자가 "2분기만", "3분기만"처럼 단일 분기 실적을 명시적으로 물었는데 자료에 누적치만 있다면,
+    절대 누적치를 단일 분기 실적인 것처럼 제시하지 마세요. 반드시 "이 수치는 O월~O월 누적 기준입니다"라고
+    명시하고, 가능하다면 [참고 자료]에 있는 직전 기간 누적치를 빼서 단일 분기 값을 계산해 보여주되
+    "(직접 계산한 추정치)"라고 표시하세요. 계산할 재료가 없다면 누적치 그대로 제시하며 기준을 명확히 밝히세요.
     """
     safe_context = context_text[:3500] if len(context_text) > 3500 else context_text
     user_prompt = f"질문: {query}\n\n[참고 자료]\n{context_text}"
@@ -413,9 +573,16 @@ def rag_search(query, k=20):
             available_sections = set()
             for d in target_doc_ids:
                 available_sections |= DOC_SECTIONS.get(d, set())
-            target_sections = select_relevant_sections(search_query, available_sections)
+
+            # 🔧 [수정 23] 규칙 기반 힌트를 먼저 시도 - 성공하면 LLM 호출 자체를 생략
+            target_sections = rule_based_section_hint(search_query, available_sections)
             if target_sections:
-                print(f"📂 선택된 섹션: {target_sections}")
+                print(f"📂 [규칙 기반] 선택된 섹션: {target_sections}")
+            else:
+                # 규칙에 없는 주제라면 기존처럼 LLM에게 맡김
+                target_sections = select_relevant_sections(search_query, available_sections)
+                if target_sections:
+                    print(f"📂 [LLM 선택] 선택된 섹션: {target_sections}")
 
     # 🔧 [수정 14] 신규 추가 - "섹션 직접 조회" 경로
     #     문제: 섹션까지 특정됐어도, 그 섹션의 청크가 벡터검색 top-300 순위 안에
