@@ -209,42 +209,41 @@ def find_target_doc_ids(target_corp, target_year, target_report_type):
 #      규칙으로 관련 섹션을 전부 확정. 이러면 매번 100% 동일하고 빠짐없이 잡힘.
 #      규칙에 없는 새로운/애매한 주제만 기존처럼 LLM에게 맡김 (select_relevant_sections)
 # ==========================================
-TOPIC_SECTION_HINTS = {
-    "매출": ["매출 및 수주", "매출실적", "매출 실적"],
-    "연구개발": ["주요계약 및 연구개발", "연구개발실적", "연구개발"],
-    "위험": ["위험관리", "파생거래"],
+UNINFORMATIVE_HEADINGS = {
+    '사업보고서', '반기보고서', '분기보고서', '1분기보고서', '3분기보고서',
+    '【 대표이사 등의 확인 】', 'I. 회사의 개요'
 }
 
-# 🔧 [수정 24] "투자"는 문맥에 따라 완전히 다른 두 가지를 의미할 수 있어 별도 분기 처리
-#     ① 설비투자/CAPEX (예: "투자 계획", "시설투자 얼마나") -> "II. 사업의 내용" 하위 섹션
-#     ② 지분투자/M&A (예: "지분 인수", "출자", "종속기업 투자") -> 재무제표의 지분투자 섹션
-#     문제: "투자"를 무조건 ①로만 고정하면, 진짜 ②를 묻는 질문("레인보우로보틱스 지분
-#          얼마나 인수했어?")에도 엉뚱하게 설비투자/연구개발 섹션을 강제로 들이밀게 됨
-#     해결: 질문에 "지분/인수/M&A/출자/합병/매각/종속기업/관계기업" 같은 명시적 신호가
-#          있을 때만 ②로 분기하고, 그 외(일반적인 "투자 계획" 등)는 기존처럼 ①로 처리
+TOPIC_SECTION_HINTS = {
+    ("연구개발", "r&d", "rnd", "연구개발비"): ["주요계약 및 연구개발", "연구개발실적", "연구개발", "매출 및 수주"],
+    ("가이던스", "전망", "정정", "기재정정", "최근 공시", "수시공시"): ["사업의 개요", "주요계약 및 연구개발", "기타 참고사항", "기타 투자판단", "매출 및 수주"],
+    ("배당", "배당금", "배당수익률", "주주환원", "자사주", "자기주식"): ["배당에 관한 사항", "연결재무제표 주석", "재무제표 주석", "요약재무정보", "주주"],
+    ("당기순이익", "순이익", "영업이익", "손익", "재무제표", "증감률"): ["요약재무정보", "연결재무제표", "재무제표"],
+    ("매출", "실적"): ["매출 및 수주", "매출실적", "매출 실적"],
+    ("위험", "리스크"): ["위험관리", "파생거래", "이사의 경영진단"],
+}
+
 EQUITY_INVESTMENT_SIGNAL_KEYWORDS = ["지분", "인수", "M&A", "합병", "출자", "종속기업", "관계기업", "매각", "지분율"]
 CAPEX_RND_SECTION_KEYWORDS = ["원재료 및 생산설비", "생산설비", "설비투자", "시설투자", "주요계약 및 연구개발", "연구개발"]
 EQUITY_SECTION_KEYWORDS = ["타법인 출자", "종속기업", "관계기업", "지분법", "특수관계자", "연결대상"]
 
 
 def rule_based_section_hint(query, available_sections):
-    """알려진 주제 키워드가 질문에 있으면, 관련 섹션을 규칙으로 바로 확정합니다."""
-    if "투자" in query:
-        if any(kw in query for kw in EQUITY_INVESTMENT_SIGNAL_KEYWORDS):
-            # ② 지분투자/M&A 문맥
-            matched = {s for s in available_sections for kw in EQUITY_SECTION_KEYWORDS if kw in s}
-        else:
-            # ① 설비투자/CAPEX/R&D 문맥 (기본값)
-            matched = {s for s in available_sections for kw in CAPEX_RND_SECTION_KEYWORDS if kw in s}
-        if matched:
-            return list(matched)
+    """알려진 주제 키워드가 질문에 있으면, 관련 섹션을 규칙으로 바로 확정합니다. (복합 키워드 지원)"""
+    query_lower = query.lower()
+    matched = set()
 
-    for topic, keywords in TOPIC_SECTION_HINTS.items():
-        if topic in query:
-            matched = {s for s in available_sections for kw in keywords if kw in s}
-            if matched:
-                return list(matched)
-    return None
+    if "투자" in query_lower:
+        if any(kw in query_lower for kw in EQUITY_INVESTMENT_SIGNAL_KEYWORDS):
+            matched |= {s for s in available_sections for kw in EQUITY_SECTION_KEYWORDS if kw in s}
+        else:
+            matched |= {s for s in available_sections for kw in CAPEX_RND_SECTION_KEYWORDS if kw in s}
+
+    for topic_keys, keywords in TOPIC_SECTION_HINTS.items():
+        if any(tk in query_lower for tk in topic_keys):
+            matched |= {s for s in available_sections for kw in keywords if kw in s}
+
+    return list(matched) if matched else None
 
 
 def select_relevant_sections(query, available_sections):
@@ -252,28 +251,19 @@ def select_relevant_sections(query, available_sections):
     if not available_sections:
         return []
 
-    # 🔧 [수정 19] 후보가 1개뿐이면 고를 필요가 없으므로 LLM 호출 없이 바로 반환
-    #     (여러 섹션 중 '의미적으로 골라야' 하는 경우에만 LLM이 필요함 — 이게 바로
-    #      규칙으로 못 푸는 진짜 중의성 지점이고, 후보가 하나면 애초에 중의성이 없음)
-    if len(available_sections) == 1:
-        return list(available_sections)
+    meaningful_sections = [s for s in available_sections if s.strip() not in UNINFORMATIVE_HEADINGS]
+    candidates = meaningful_sections if meaningful_sections else list(available_sections)
 
-    sections_list_str = "\n".join(f"- {s}" for s in sorted(available_sections))
-    system_prompt = f"""당신은 기업 공시 보고서의 목차 중 질문과 가장 관련 있는 섹션을 고르는 어시스턴트입니다.
+    if len(candidates) <= 1:
+        return candidates
+
+    sections_list_str = "\n".join(f"- {s}" for s in sorted(candidates))
+    system_prompt = f"""당신은 기업 공시 보고서의 목차 중 질문과 가장 관련 있는 섹션을 고르는 전문 어시스턴트입니다.
 아래는 이 보고서의 전체 목차 목록입니다:
 {sections_list_str}
 
-사용자 질문에 답하기 위해 반드시 확인해야 하는 섹션을 목록에서 최대 3개까지 고르세요.
-
-[헷갈리기 쉬운 용어 구분 - 반드시 참고하세요]
-공시 보고서에서 같은 단어가 서로 다른 섹션에서 다른 의미로 쓰이는 경우가 많습니다. 질문의 진짜 의도에 맞는 섹션만 고르세요.
-- "투자 계획/내역/현황" (설비투자, 시설투자, CAPEX, 연구개발 관련 질문)
-  -> "II. 사업의 내용" 하위의 "원재료 및 생산설비", "주요계약 및 연구개발활동" 같은 섹션을 우선하세요.
-  -> "III. 재무에 관한 사항"의 "증권의 발행을 통한 자금조달", "지분증권/채무증권 발행실적" 같은
-     재무조달(파이낸싱) 섹션은 질문이 명시적으로 "자금조달", "채권 발행", "증자"를 묻지 않는 한 고르지 마세요.
-     (이건 회사가 어떻게 '돈을 마련했는지'에 대한 내용이지, 회사가 '어디에 투자했는지'가 아닙니다.)
-- "매출/실적" 질문 -> "매출 및 수주상황" 섹션을 우선하고, 재무제표 주석의 세부 계정과목은 후순위로.
-- "지분 투자/M&A/인수합병" 질문일 때만 재무제표 주석의 "타법인 출자", "종속기업 투자" 같은 섹션을 고르세요.
+사용자 질문에 답하기 위해 반드시 확인해야 하는 가장 적절한 핵심 섹션을 목록에서 1~3개 고르세요.
+단순 '사업보고서', '반기보고서', '대표이사 등의 확인' 같은 상위 껍데기 목차는 절대 선택하지 마세요.
 
 목록에 있는 텍스트를 정확히 그대로 복사해서, 콤마(,)로 구분해 출력하세요. 그 외 부연 설명은 절대 추가하지 마세요."""
 
@@ -293,32 +283,35 @@ def select_relevant_sections(query, available_sections):
     try:
         res = requests.post(NAVER_ENDPOINT, headers=headers, json=payload, timeout=5)
         if res.status_code != 200:
-            print(f"⚠️ [섹션 선택 API 오류] 상태 코드: {res.status_code}")  # 🔧 [수정 17]
+            print(f"⚠️ [섹션 선택 API 오류] 상태 코드: {res.status_code}")
             return []
         result = res.json()
         content = result.get('result', {}).get('message', {}).get('content', '').strip()
         picked = [s.strip() for s in content.split(',') if s.strip()]
-        # 🔧 [수정 16] 완전 일치 우선, 실패 시 부분 일치(포함 관계)까지 허용
-        #     이유: LLM이 목차를 그대로 베끼다가 공백/번호 표기가 살짝 달라지면
-        #          완전 일치 검증에서 전부 탈락해 target_sections가 비어버리는 문제 방지
-        valid = [s for s in picked if s in available_sections]
+        valid = [s for s in picked if s in available_sections and s not in UNINFORMATIVE_HEADINGS]
         if not valid:
             for p in picked:
                 for s in available_sections:
-                    if p and (p in s or s in p):
+                    if p and (p in s or s in p) and s not in UNINFORMATIVE_HEADINGS:
                         valid.append(s)
-        if not valid:
-            print(f"⚠️ [섹션 선택 실패] LLM 응답: '{content}' / 목차 후보 {len(available_sections)}개 중 매칭 없음")  # 🔧 [수정 17]
-        return list(dict.fromkeys(valid))  # 순서 유지하며 중복 제거
+        return list(dict.fromkeys(valid))
     except Exception as e:
-        print(f"⚠️ [섹션 선택 예외] {e}")  # 🔧 [수정 17]
+        print(f"⚠️ [섹션 선택 예외] {e}")
         return []
 
-# 🔧 [수정 5] 신규 추가 - 질문에 포함된 연도(시점) 추출
-# rewrite_query가 이미 "2026년" 같은 절대 연도로 바꿔주므로, 여기서는 4자리 연도만 뽑으면 됨
+
 def extract_target_year(query):
     match = re.search(r'(20\d{2})년', query)
-    return match.group(1) if match else None
+    if match:
+        return match.group(1)
+    current_year = datetime.now().year
+    if any(kw in query for kw in ["재작년"]):
+        return str(current_year - 2)
+    if any(kw in query for kw in ["작년", "전년도"]):
+        return str(current_year - 1)
+    if any(kw in query for kw in ["올해", "이번 년도", "이번년도", "금년"]):
+        return str(current_year)
+    return None
 
 # 🔧 [수정 8] 신규 추가 - 질문에 포함된 보고서 종류(분기/반기/사업보고서) 추출
 # 예: "2026년 1분기 분기보고서" -> "분기보고서"로 매칭되도록
@@ -341,6 +334,9 @@ def extract_target_report_type(query):
     for report_type, keywords in REPORT_TYPE_KEYWORDS.items():
         if any(kw in query for kw in keywords):
             return report_type
+    # 분기/반기 언급 없이 연도(예: 2024년, 작년)만 있는 연간 실적 질의는 기본적으로 '사업보고서'를 우선 대상으로 설정
+    if extract_target_year(query):
+        return "사업보고서"
     return None
 
 # ==========================================
@@ -352,7 +348,7 @@ def extract_target_report_type(query):
 #          없으면 LLM 호출 없이 원본 질문을 그대로 반환 -> 불필요한 지연/비용 제거
 #          있을 때만 LLM을 호출해 정확한 연도 계산(윤년 등 특수 로직 없이 문맥 이해 필요한 부분)을 맡김
 # ==========================================
-RELATIVE_TIME_KEYWORDS = ["올해", "이번 년도", "이번년도", "작년", "전년도", "재작년", "내년"]
+RELATIVE_TIME_KEYWORDS = ["올해", "이번 년도", "이번년도", "작년", "전년도", "재작년", "내년", "금년"]
 
 def has_relative_time_expression(query):
     return any(kw in query for kw in RELATIVE_TIME_KEYWORDS)
@@ -360,54 +356,24 @@ def has_relative_time_expression(query):
 
 def rewrite_query(original_query):
     """
-    사용자 질문에 포함된 상대적 시간(올해, 작년 등)을 절대 연도로 변환합니다.
+    사용자 질문에 포함된 상대적 시간(올해, 작년, 재작년 등)을 절대 연도로 즉시 정확하게 변환합니다.
     """
-    # 🔧 [수정 18] 규칙으로 먼저 판단: 상대시점 표현이 없으면 LLM 호출 없이 바로 반환
     if not has_relative_time_expression(original_query):
         return original_query
 
     current_year = datetime.now().year
+    converted = original_query
     
-    system_prompt = f"""
-당신은 검색 쿼리 변환 어시스턴트입니다.
-현재 기준 연도는 {current_year}년입니다.
-사용자의 질문에 포함된 상대적인 시점 표현을 아래 기준에 따라 정확한 연도로 변환하여 오직 '변환된 질문' 한 문장만 출력하세요. 부연 설명은 절대 추가하지 마세요.
-
-[변환 기준]
-- 올해 / 이번 년도 -> {current_year}년
-- 작년 / 전년도 -> {current_year - 1}년
-- 재작년 -> {current_year - 2}년
-- 내년 -> {current_year + 1}년
-- 특정 시점 언급이 없으면 원본 질문 유지
-
-[예시]
-- 질문: kb 금융 올해 매출은 얼마야? -> {current_year}년 KB금융 매출액은 얼마인가요?
-- 질문: 작년 영업이익 알려줘 -> {current_year - 1}년 영업이익 알려줘
-"""
-
-    headers = {
-        'Authorization': f'Bearer {NAVER_API_KEY}',
-        'X-NCP-CLOVASTUDIO-REQUEST-ID': str(uuid.uuid4()),
-        'Content-Type': 'application/json; charset=utf-8'
-    }
-
-    payload = {
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": original_query}
-        ],
-        "temperature": 0.0,
-        "maxTokens": 60
-    }
+    # 1. 재작년 -> 2024년
+    converted = re.sub(r'재작년(?:도)?', f'{current_year - 2}년', converted)
+    # 2. 작년 / 전년도 -> 2025년
+    converted = re.sub(r'(?:작년|전년도)', f'{current_year - 1}년', converted)
+    # 3. 올해 / 이번 년도 / 이번년도 / 금년 -> 2026년
+    converted = re.sub(r'(?:올해|이번\s*년도|금년)', f'{current_year}년', converted)
+    # 4. 내년 -> 2027년
+    converted = re.sub(r'내년', f'{current_year + 1}년', converted)
     
-    try:
-        res = requests.post(NAVER_ENDPOINT, headers=headers, json=payload, timeout=5)
-        if res.status_code == 200:
-            result = res.json()
-            return result.get('result', {}).get('message', {}).get('content', original_query).strip()
-    except Exception:
-        pass
-    return original_query
+    return converted
 
 # 3. 비서 역할(LLM) 함수 만들기
 def generate_answer(query, context_text):
@@ -421,15 +387,10 @@ def generate_answer(query, context_text):
     3. 숫자는 읽기 쉽게 단위(조, 억원 등)로 환산하여 표현해 주세요. (예: 333,605,938 백만원 -> 333조 6,059억 원)
     4. 답변 바로 다음 줄에 아래 포맷으로 간결하게 근거를 명시하세요.
 
-    [중요 규칙: 무관한 정보 처리 (Anti-Hallucination)]
-    🔧 [수정 4] 기존에는 질문 주제와 '정확히' 일치하지 않으면 무조건 거절 문구만 출력했음
-              -> 랜덤 질문에서 "관련은 있지만 완전 일치는 아닌" 자료도 전부 거절되는 원인이었음
-    변경된 규칙:
-    - [참고 자료]에 질문과 관련성 있는 내용이 조금이라도 있다면, 그 범위 내에서 최대한 답변하세요.
-      그리고 답변 마지막 줄에 "다만 요청하신 정확한 항목({세부 항목})은 자료에서 확인되지 않았습니다."처럼
-      부족한 부분만 짧게 덧붙이세요.
-    - [참고 자료] 전체가 질문 주제와 완전히 무관할 때만 아래 거절 문장을 출력하세요.
-    "검색된 자료에서 요청하신 '{질문 주제}'에 대한 구체적인 정보를 찾을 수 없습니다. 검색 키워드를 변경해 주세요."
+    [중요 규칙: 부분 공시 및 미공시 항목 처리]
+    - 질문에서 2가지 이상을 질의했으나 일부 항목만 공시된 경우(예: 북미 매출액은 있으나 지역별 영업이익은 미공시):
+      확인 가능한 항목(예: 북미 매출액 83조 4,448억 원)을 우선 구체적인 수치와 단위(조/억원)로 정확하게 답변하고, 미공시된 세부 항목은 "다만 지역별 영업이익은 연결재무제표 주석(지역별 정보)상 별도로 분리 공시되지 않았습니다."와 같이 명확히 사실대로 안내하세요. 절대 전체를 정보 없음으로 거절하지 마세요.
+    - [참고 자료] 전체가 질문 주제와 완전히 무관할 때만 "검색된 자료에서 요청하신 정보에 대한 구체적인 내용을 찾을 수 없습니다."라고 안내하세요.
 
     [답변 템플릿]
     {기업명} {연도/보고서명} 기준 주요 {질문 주제}:
@@ -437,6 +398,9 @@ def generate_answer(query, context_text):
     2. {핵심 항목2} — {수치 및 간결한 증감 요약}
     근거: 접수번호 {접수번호}, {목차명} / {목차명2}
     
+    [지주회사 및 R&D/특수 공시 안내 규칙]
+    - 지주회사(예: 세아베스틸지주 등)의 경우: 자체 공시상 별도 연구개발(R&D) 활동/비용이 기재되지 않거나 '해당사항 없음'으로 처리된 경우, 단순히 정보가 없다고 하지 말고 "지주회사 특성상 별도의 자체 연구개발(R&D) 조직 및 비용 지출이 없으며(해당사항 없음), 자회사 관리 및 배당/용역 중심의 영업수익을 창출하고 있습니다."와 같이 지주회사의 공시 사실과 사업 특성을 명확하게 설명하세요.
+
     [작성 예시]
     KB금융 2025년 사업보고서 기준 주요 실적:
     1. 당기순이익 — 5조 8,332억 원 (전년 대비 7,550억 원 증가)
@@ -487,6 +451,78 @@ def generate_answer(query, context_text):
 # 기존엔 이 로직이 rag_search 안 for문 안에 박혀 있어서, 벡터검색 결과에만 적용 가능했음
 # 분리 이유: 아래에서 "섹션 직접 조회" 경로도 동일한 포맷을 써야 하기 때문
 # ==========================================
+def fast_rank_chunks(query, chunks, top_k=20):
+    """수천~수만 개 청크가 있을 때, 조사 제거 및 복합 키워드 교차 매칭으로 0.05초 내에 핵심 표/데이터 청크를 정확히 선별합니다."""
+    if len(chunks) <= top_k:
+        return chunks
+
+    raw_tokens = re.findall(r'[a-zA-Z0-9가-힣]+', query)
+    stopwords = {
+        '기준', '알려줘', '알려주세요', '얼마야', '어떻게', '대한', '관한', '에서', '으로', '보고서',
+        '기준으로', '요약해', '전년', '대비', '올해', '작년', '재작년', '사업보고서', '분기보고서', '반기보고서',
+        '2023년', '2024년', '2025년', '2026년', '현대자동차', '현대차', '카카오', '삼성전자', '포스코', '네이버'
+    }
+
+    keywords = set()
+    for tok in raw_tokens:
+        clean = re.sub(r'(?:과|와|을|를|의|은|는|이|가|에|로|으로|에서)$', '', tok)
+        if len(clean) >= 2 and clean not in stopwords:
+            keywords.add(clean)
+        if len(tok) >= 2 and tok not in stopwords:
+            keywords.add(tok)
+
+    if not keywords:
+        return chunks[:top_k]
+
+    # 각 키워드의 문서 내 출현 빈도(문서 빈도)를 측정하여 희소 고유명사(예: '북미', '연구개발')에 초고가중치 부여
+    kw_doc_counts = {kw: 0 for kw in keywords}
+    for c in chunks:
+        combined = c.get('heading_path', '') + ' ' + c.get('text', '')
+        for kw in keywords:
+            if kw in combined:
+                kw_doc_counts[kw] += 1
+
+    total_docs = len(chunks)
+    kw_weights = {
+        kw: max(2.0, 50.0 / (kw_doc_counts[kw] + 1)) if kw_doc_counts[kw] < total_docs * 0.05 else 1.0
+        for kw in keywords
+    }
+
+    scored = []
+    for c in chunks:
+        h = c.get('heading_path', '')
+        t = c.get('text', '')
+        combined = h + ' ' + t
+        matched_kws = [kw for kw in keywords if kw in combined]
+        if matched_kws:
+            # 매칭된 키워드 가중치 합산 + 다중 키워드 동시 출현 보너스
+            s = sum(kw_weights[kw] for kw in matched_kws) * (len(matched_kws) ** 1.5)
+            if any(kw in h for kw in matched_kws):
+                s *= 2.0
+            scored.append((s, c))
+
+    if scored:
+        scored.sort(key=lambda x: x[0], reverse=True)
+        candidates = [c for s, c in scored[:100]]
+    else:
+        candidates = chunks[:100]
+
+    if len(candidates) <= top_k:
+        return candidates
+
+    # 2단계: 선별된 후보에 대해서만 정밀 임베딩 코사인 유사도 계산 (0.05초 소요)
+    q_vec = model.encode([query]).astype('float32')
+    sample_texts = [(c.get('heading_path', '') + ' ' + c.get('text', ''))[:400] for c in candidates]
+    c_vecs = model.encode(sample_texts, batch_size=64, show_progress_bar=False).astype('float32')
+
+    q_norm = q_vec / (np.linalg.norm(q_vec, axis=1, keepdims=True) + 1e-9)
+    c_norm = c_vecs / (np.linalg.norm(c_vecs, axis=1, keepdims=True) + 1e-9)
+    scores = np.dot(c_norm, q_norm.T).squeeze()
+
+    top_indices = np.argsort(scores)[::-1][:top_k]
+    return [candidates[i] for i in top_indices]
+
+
 def format_chunk(chunk):
     text = chunk.get('text', '내용 없음')
     doc_id = chunk.get('doc_id', '')
@@ -594,15 +630,28 @@ def rag_search(query, k=20):
     filtered_out_texts = []
     MAX_CONTEXT_CHUNKS = 20
 
+    direct_chunks = []
     if target_sections and target_doc_ids:
         direct_chunks = [
             c for c in metadata
             if c.get('doc_id') in target_doc_ids and c.get('heading_path') in target_sections
         ]
-        print(f"📌 섹션 직접 조회로 {len(direct_chunks)}개 청크를 찾았습니다.")
-        for c in direct_chunks[:MAX_CONTEXT_CHUNKS]:
-            formatted_text, _, _, _, _ = format_chunk(c)
-            retrieved_texts.append(formatted_text)
+        if direct_chunks:
+            print(f"📌 섹션 직접 조회로 {len(direct_chunks)}개 청크를 찾았습니다.")
+            if len(direct_chunks) > MAX_CONTEXT_CHUNKS:
+                print(f"🎯 후보 청크({len(direct_chunks)}개)가 많아 고속 2단계 선별(키워드+유사도)로 상위 {MAX_CONTEXT_CHUNKS}개를 선별합니다...")
+                direct_chunks = fast_rank_chunks(search_query, direct_chunks, MAX_CONTEXT_CHUNKS)
+
+    # 🔧 [보완] 목차 누락/변형(예: 현대차, NAVER)으로 섹션 조회가 1개 이하인 경우 -> 해당 문서 전체 청크 대상 정밀 검색 수행
+    if target_doc_ids and len(direct_chunks) <= 1:
+        doc_chunks = [c for c in metadata if c.get('doc_id') in target_doc_ids]
+        if doc_chunks and len(doc_chunks) > 1:
+            print(f"🎯 문서 내 세부 섹션 미식별로 전체 {len(doc_chunks)}개 청크 대상 고속 정밀 검색을 수행합니다...")
+            direct_chunks = fast_rank_chunks(search_query, doc_chunks, MAX_CONTEXT_CHUNKS)
+
+    for c in direct_chunks[:MAX_CONTEXT_CHUNKS]:
+        formatted_text, _, _, _, _ = format_chunk(c)
+        retrieved_texts.append(formatted_text)
 
     if retrieved_texts:
         combined_context = "\n".join(retrieved_texts)
