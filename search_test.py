@@ -25,8 +25,13 @@ metadata_path = 'faiss_index/metadata_final.pkl'
 lineage_path = 'doc_lineage.json'  # 정정공시 이력(족보) 파일 경로
 
 # 2. 모델, 인덱스, 메타데이터, 족보 데이터 로드
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 print("🤖 AI 모델 및 데이터 로드 중...")
-model = SentenceTransformer('jhgan/ko-sroberta-multitask')
+try:
+    model = SentenceTransformer('jhgan/ko-sroberta-multitask', local_files_only=True)
+except Exception:
+    model = SentenceTransformer('jhgan/ko-sroberta-multitask')
 
 print(f"📂 FAISS 인덱스 로드: {index_path}")
 index = faiss.read_index(index_path)
@@ -177,15 +182,28 @@ for chunk in metadata:
     _heading = chunk.get('heading_path')
     if _heading:
         DOC_SECTIONS.setdefault(_doc_id, set()).add(_heading)
-    if _doc_id not in DOC_INFO:
+    if _doc_id not in DOC_INFO or not DOC_INFO[_doc_id].get('corp_name'):
         _receipt_no = _doc_id.split('_')[-1] if '_' in _doc_id else _doc_id
         _year = get_period_year(_receipt_no)  # 🔧 [수정 15] 접수연도 대신 보고기간 연도 사용
-        DOC_INFO[_doc_id] = {'corp_name': chunk.get('corp_name', ''), 'year': _year}
+        _lineage_entry = doc_lineage.get(_receipt_no, {})
+        _cn = chunk.get('corp_name') or _lineage_entry.get('corp_name') or STOCK_CODE_MAP.get(chunk.get('stock_code', ''), '') or STOCK_CODE_MAP.get(_lineage_entry.get('corp_code', ''), '')
+        DOC_INFO[_doc_id] = {'corp_name': _cn, 'year': _year}
 
 
-def find_target_doc_ids(target_corp, target_year, target_report_type):
+def find_target_doc_ids(target_corp, target_year, target_report_type, query=""):
     """회사/연도/보고서종류 조건에 맞는 문서(doc_id)들을 찾음"""
     matched = []
+    is_guidance_or_exchange = any(kw in query for kw in ["가이던스", "정정", "기재정정", "수시공시", "주요경영사항", "전망"])
+    
+    # 1. 가이던스/수시공시 질의인 경우: 해당 대상 기업(target_corp)의 수시공시(exchange) 문서만 정확히 매칭
+    if is_guidance_or_exchange and target_corp:
+        for doc_id, info in DOC_INFO.items():
+            if info.get('corp_name') == target_corp and "exchange" in doc_id:
+                matched.append(doc_id)
+        if matched:
+            return matched
+
+    # 2. 일반 정기보고서 매칭
     for doc_id, info in DOC_INFO.items():
         if target_corp and info['corp_name'] != target_corp:
             continue
@@ -215,12 +233,15 @@ UNINFORMATIVE_HEADINGS = {
 }
 
 TOPIC_SECTION_HINTS = {
-    ("연구개발", "r&d", "rnd", "연구개발비"): ["주요계약 및 연구개발", "연구개발실적", "연구개발", "매출 및 수주"],
-    ("가이던스", "전망", "정정", "기재정정", "최근 공시", "수시공시"): ["사업의 개요", "주요계약 및 연구개발", "기타 참고사항", "기타 투자판단", "매출 및 수주"],
-    ("배당", "배당금", "배당수익률", "주주환원", "자사주", "자기주식"): ["배당에 관한 사항", "연결재무제표 주석", "재무제표 주석", "요약재무정보", "주주"],
-    ("당기순이익", "순이익", "영업이익", "손익", "재무제표", "증감률"): ["요약재무정보", "연결재무제표", "재무제표"],
-    ("매출", "실적"): ["매출 및 수주", "매출실적", "매출 실적"],
+    ("연구개발", "r&d", "rnd", "연구개발비", "개발비"): ["주요계약 및 연구개발", "연구개발실적", "연구개발", "연구개발활동", "연구개발비용", "연구개발", "6. 주요계약", "연구개발활동", "연구개발실적", "원재료 및 생산설비"],
+    ("가이던스", "전망", "정정", "기재정정", "최근 공시", "수시공시", "주요경영사항"): ["투자판단관련주요경영사항", "장래사업", "경영계획", "사업의 개요", "기타 참고사항", "기타 투자판단", "주요계약 및 연구개발"],
+    ("배당", "배당금", "배당수익률", "주주환원", "자사주", "자기주식"): ["배당에 관한 사항", "주주에 관한 사항", "주주", "요약재무정보"],
+    ("당기순이익", "순이익", "영업이익", "손익", "증감률"): ["요약재무정보", "연결재무제표", "포괄손익계산서", "손익계산서"],
+    ("재무제표", "재무상태"): ["요약재무정보", "연결재무제표", "재무제표"],
+    ("매출", "실적", "비중", "국내", "해외", "점유율", "지역별", "부문별"): ["매출 및 수주", "매출실적", "매출 실적", "사업의 개요"],
+    ("임원", "직원", "임직원", "연봉", "급여", "보수", "근속", "근속연수", "인력", "직원수", "직원 현황", "평균 연봉", "평균 연봉과", "평균근속연수"): ["임원 및 직원 등의 현황", "임원 및 직원", "임원의 보수 등", "임원의 보수", "직원의 현황", "직원 등의 현황", "임원 및 직원 등에 관한 사항"],
     ("위험", "리스크"): ["위험관리", "파생거래", "이사의 경영진단"],
+    ("이사회", "사외이사", "감사제도", "주총"): ["이사회 등에 관한 사항", "이사회에 관한 사항", "감사제도에 관한 사항"],
 }
 
 EQUITY_INVESTMENT_SIGNAL_KEYWORDS = ["지분", "인수", "M&A", "합병", "출자", "종속기업", "관계기업", "매각", "지분율"]
@@ -233,15 +254,21 @@ def rule_based_section_hint(query, available_sections):
     query_lower = query.lower()
     matched = set()
 
-    if "투자" in query_lower:
+    # 1. R&D, 배당, 실적 등 전용 주제를 우선 매칭 (예: '연구개발 투자'는 R&D 섹션으로 유도)
+    for topic_keys, keywords in TOPIC_SECTION_HINTS.items():
+        if any(tk in query_lower for tk in topic_keys):
+            hits = {s for s in available_sections for kw in keywords if kw in s}
+            # 손익/영업이익/증감률/배당 질의 시 수천 개에 달하는 회계주석(3. 연결재무제표 주석 등)은 배제
+            if any(k in query_lower for k in ["영업이익", "증감률", "순이익", "손익", "배당"]):
+                hits = {s for s in hits if "주석" not in s and "이사회" not in s and "대주주" not in s}
+            matched |= hits
+
+    # 2. 일반 투자(설비투자 / 지분투자) 처리 (R&D 질의가 아닌 경우)
+    if "투자" in query_lower and not any(k in query_lower for k in ["연구개발", "r&d", "rnd", "개발비"]):
         if any(kw in query_lower for kw in EQUITY_INVESTMENT_SIGNAL_KEYWORDS):
             matched |= {s for s in available_sections for kw in EQUITY_SECTION_KEYWORDS if kw in s}
         else:
             matched |= {s for s in available_sections for kw in CAPEX_RND_SECTION_KEYWORDS if kw in s}
-
-    for topic_keys, keywords in TOPIC_SECTION_HINTS.items():
-        if any(tk in query_lower for tk in topic_keys):
-            matched |= {s for s in available_sections for kw in keywords if kw in s}
 
     return list(matched) if matched else None
 
@@ -382,21 +409,66 @@ def generate_answer(query, context_text):
     반드시 제공된 [참고 자료]에 있는 정보만 사용하여 답변하세요.
     
     [필수 작성 규칙]
-    1. 불필요한 서두와 결미(예: '안녕하세요', '죄송합니다만', '확인할 수 있는 내용은 다음과 같습니다')는 절대 출력하지 마세요.
-    2. 질문에 대한 핵심 수치와 팩트를 1~2문장의 깔끔한 완성형 문장으로 바로 제시하세요.
-    3. 숫자는 읽기 쉽게 단위(조, 억원 등)로 환산하여 표현해 주세요. (예: 333,605,938 백만원 -> 333조 6,059억 원)
-    4. 답변 바로 다음 줄에 아래 포맷으로 간결하게 근거를 명시하세요.
+    1. 불필요한 서두와 결미(예: '안녕하세요', '죄송합니다만', '이 정보는 가장 최신의 사업보고서에서...', '확인할 수 있는 내용은...')는 절대 출력하지 마세요.
+    2. 질문에 주당 배당금과 배당수익률처럼 복수 지표가 포함된 경우(예: '주당 배당금(배당수익률)과 총 배당금액'), 각각을 분리하여 명확하게 작성하세요:
+       - 주당 배당금(보통주): 20,000원 (표에 적힌 주당 현금배당금 금액 원문)
+       - 배당수익률(보통주): 1.5% (표에 적힌 현금배당수익률 % 원문)
+       - 총 배당금액: 4,078억 6,500만 원 (407,865백만 원)
+    3. 💰 단위 환산 공식 및 자릿수 검증 (★단위 왜곡 절대 금지★):
+       - 7~8자리 백만원 수치 (X,XXX,XXX 백만원 이상) -> 【 조 원 단위 변환: 수치 ÷ 1,000,000 】
+         * 21,743,980 백만원 -> 【 약 21조 7,440억 원 】
+         * 6,480,541 백만원 -> 【 약 6조 4,805억 원 】 (★절대 6,480억 원으로 10배 축소 금지!)
+         * 14,069,393 백만원 -> 【 약 14.1조 원 】
+         * 83,444,813 백만원 -> 【 약 83.4조 원 】
+         * 7,871,692 백만원 -> 【 약 7조 8,717억 원 (약 7.87조 원) 】 (★절대 78조 원으로 10배 확대 금지!)
+       - 5~6자리 백만원 수치 (XX,XXX ~ XXX,XXX 백만원) -> 【 억 원 단위 변환: 수치 ÷ 100 】
+         * 925,470 백만원 -> 【 약 9,255억 원 】 (★절대 925조 원으로 1,000배 확대 금지!)
+         * 426,407 백만원 -> 【 약 4,264억 원 】
+         * 209,799 백만원 -> 【 약 2,098억 원 】
+       - 3~4자리 백만원 수치 (X,XXX 백만원) -> 【 억 원 단위 변환: 수치 ÷ 100 】
+         * 4,408 백만원 -> 【 약 44.1억 원 】 (★절대 440억 원으로 10배 확대 금지!)
+         * 4,707 백만원 -> 【 약 47.1억 원 】 (★절대 470억 원으로 10배 확대 금지!)
+    4. 🚢 수주 상황 표(조선/건설 등) 용어 및 수치 해석 규칙:
+       - '수주총액'은 체결된 공사들의 【 누적 총 계약금액(수주총액) 】을 뜻하며, '당기 신규 수주액'이 아닙니다.
+       - 질문에서 '신규 수주'를 물었더라도 표의 수주총액을 '신규 수주'라는 명칭으로 바꿔 부르지 마세요. 반드시 【 누적 수주총액: 약 O조 원 (당기 신규 수주액은 본문에 별도 분리 공시되지 않음) 】과 같이 명확히 구분하여 작성하세요.
+       - '수주잔고'는 향후 납품/건조해야 할 【 남은 공사 잔액(수주잔고) 】입니다.
+    5. 📈 증감률 및 비율 계산 정확도 규칙 (★산술 오류 절대 금지★):
+       - 증감률 공식: 【 (당기 수치 - 전기 수치) ÷ 전기 수치 × 100 (%) 】
+       - 당기 수치, 전기 수치, 증감액을 반드시 확인하고 정확히 계산하여 표기하세요.
+         * 예: 당기 426,407 백만원, 전기 389,717 백만원 -> 증감액 +36,690 백만원 (+36,690 ÷ 389,717 × 100 = 약 9.41% 증가)
+       - 임의로 암산하거나 어림수를 만들어내지 말고 정확한 수치로 계산하세요.
+    6. 📊 지역별 / 사업부문별 매출 비중 분석 규칙 (★순매출액 기준 준수★):
+       - 지역별/사업부문별 매출 표에서 내부거래(내부매출액)가 존재하는 경우, 반드시 【 순매출액 (외부고객 매출) 】 행의 수치를 기준으로 비중을 계산하세요.
+       - '총매출액(내부거래 전 단순합산)'과 '순매출액(연결 실질 매출)'을 절대 혼동하지 마세요.
+       - 해외 매출 비중을 구할 때 연결 총매출에서 국내 총매출을 단순 차감하여 임의의 해외 수치를 만들지 마세요.
+         * 해외 각 지역(북미, 유럽, 기타 등)의 순매출을 정확히 합산하거나 공시된 해외 부문 순매출 합계를 전체 연결 순매출로 나누어 비중(%)을 도출하세요.
+         * 예: 기아 제81기 반기 연결 기준 -> 국내 순매출 14조 694억 원(약 26.2%), 해외 순매출 39조 7,114억 원(약 73.8%), 연결 총 순매출 53조 7,808억 원.
+    7. 📌 공시된 비율(%) 원문 그대로 인용 규칙 (★배당수익률 / R&D 비율 / 지분율 등 소수점 왜곡 절대 금지★):
+       - 연구개발(R&D) 비용 및 매출액 대비 비율은 공시 본문 표(‘연구개발비용 계’, ‘매출액 대비 비율(%)’)에 적힌 수치를 그대로 인용하세요. 설비투자(CAPEX) 금액을 연구개발비로 혼동하지 마세요.
+       - 공시표에 이미 '%' 단위로 기재된 수치(예: 현금배당수익률 1.5, 배당성향 52.6, 지분율 31.82 등)는 표에 적힌 숫자 그대로 '1.5%', '52.6%', '31.82%'로 인용하세요.
+       - 표의 '1.5'를 100으로 나누어 '0.015%'나 '0.0152%'처럼 100배 축소 표기하거나 소수로 왜곡하지 마세요.
+    8. 답변의 맨 마지막 줄에는 실제로 인용한 대표 문서 1~2개의 접수번호와 목차명만 간결하게 명시하세요 (접수번호 수십 개 나열 금지):
+       # 근거: 접수번호 {접수번호}, {목차명}
 
-    [중요 규칙: 부분 공시 및 미공시 항목 처리]
-    - 질문에서 2가지 이상을 질의했으나 일부 항목만 공시된 경우(예: 북미 매출액은 있으나 지역별 영업이익은 미공시):
-      확인 가능한 항목(예: 북미 매출액 83조 4,448억 원)을 우선 구체적인 수치와 단위(조/억원)로 정확하게 답변하고, 미공시된 세부 항목은 "다만 지역별 영업이익은 연결재무제표 주석(지역별 정보)상 별도로 분리 공시되지 않았습니다."와 같이 명확히 사실대로 안내하세요. 절대 전체를 정보 없음으로 거절하지 마세요.
-    - [참고 자료] 전체가 질문 주제와 완전히 무관할 때만 "검색된 자료에서 요청하신 정보에 대한 구체적인 내용을 찾을 수 없습니다."라고 안내하세요.
+    [중요 규칙: 부분 공시 및 미공시 항목 처리 (★반드시 준수★)]
+    1. 다중 질의 중 일부만 확인되는 경우 (예: '북미 시장 매출액과 영업이익'):
+       - [참고 자료]에 '북미 매출액(83,444,813백만원)' 표가 있다면 확인 가능한 항목을 1순위로 명확하게 작성하세요.
+         * 1. 북미 시장 매출액: 약 83조 4,448억 원 (83,444,813백만 원)
+       - ★[절대 주의] 자료에 명시되지 않은 지역별 영업이익 수치를 임의로 추정하거나 다른 수치를 지어내지 마세요.
+         * 2. 북미 시장 영업이익: 연결재무제표 주석(지역별 정보)상 지역별 영업이익은 별도로 분리 공시되지 않았습니다.
+    2. 조선/건설 등 수주 관련 질의 (예: '수주 잔고와 신규 수주 내역'):
+       - 표의 '수주총액'을 '신규 수주'로 바꿔 부르지 마세요.
+       - 1. 수주잔고: 약 28조 2,289억 원 (상선 약 21조 7,440억 원, 해양/특수선 약 6조 4,805억 원 등)
+       - 2. 누적 수주총액: 약 29조 7,345억 원 (상선 약 22조 9,207억 원 등, 총 계약금액 기준이며 분기 단독 신규 수주액은 본문에 별도 분리 공시되지 않음)
+       - ★모든 백만원 수치는 반드시 조/억원 단위로 환산하여 표기하세요.
+    3. [참고 자료] 전체가 질문 주제와 완전히 무관할 때만 "검색된 자료에서 요청하신 정보에 대한 구체적인 내용을 찾을 수 없습니다."라고 안내하세요.
 
     [답변 템플릿]
     {기업명} {연도/보고서명} 기준 주요 {질문 주제}:
-    1. {핵심 항목1} — {수치 및 간결한 증감 요약}
-    2. {핵심 항목2} — {수치 및 간결한 증감 요약}
-    근거: 접수번호 {접수번호}, {목차명} / {목차명2}
+    - {핵심 항목1}: {수치}
+    - {핵심 항목2}: {수치}
+    
+    # 근거: 접수번호 {접수번호}, {목차명}
     
     [지주회사 및 R&D/특수 공시 안내 규칙]
     - 지주회사(예: 세아베스틸지주 등)의 경우: 자체 공시상 별도 연구개발(R&D) 활동/비용이 기재되지 않거나 '해당사항 없음'으로 처리된 경우, 단순히 정보가 없다고 하지 말고 "지주회사 특성상 별도의 자체 연구개발(R&D) 조직 및 비용 지출이 없으며(해당사항 없음), 자회사 관리 및 배당/용역 중심의 영업수익을 창출하고 있습니다."와 같이 지주회사의 공시 사실과 사업 특성을 명확하게 설명하세요.
@@ -407,9 +479,9 @@ def generate_answer(query, context_text):
     2. 주요 계열사 실적 — 국민은행 3조 852억 원, KB손해보험 7,780억 원, KB증권 6,740억 원 등
     근거: 접수번호 20260619000667, II. 사업의 내용 - 마. 그룹 영업실적
     
-    [중요 규칙: 정정공시 처리]
-    1. 검색된 [참고 자료]에 과거 문서(정정 전)와 최신 문서(정정 후) 내용이 모두 포함되어 있다면, 최신 버전의 수치와 증감률을 우선적으로 반영하세요.
-    2. 최신 문서(is_latest가 true인 문서)의 내용을 최종 사실로 간주하세요.
+    [중요 규칙: 정정공시 및 가이던스 처리]
+    1. 검색된 [참고 자료]에 기재정정 문서(`[기재정정]투자판단관련주요경영사항` 등)가 포함되어 있다면, 기재정정된 주요 변경 사항(예: 정정 전 수치 -> 정정 후 최신 확정 가이던스/매출 목표 수치)을 구체적으로 비교하여 명시하세요.
+    2. 최신 문서(is_latest가 true이거나 기재정정으로 반영된 최신 문서)의 가이던스 및 전망 수치를 최종 확정치로 안내하세요.
 
     [중요 규칙: 누적치 vs 단일분기 구분]
     🔧 [수정 21] 신규 추가
@@ -421,8 +493,8 @@ def generate_answer(query, context_text):
     명시하고, 가능하다면 [참고 자료]에 있는 직전 기간 누적치를 빼서 단일 분기 값을 계산해 보여주되
     "(직접 계산한 추정치)"라고 표시하세요. 계산할 재료가 없다면 누적치 그대로 제시하며 기준을 명확히 밝히세요.
     """
-    safe_context = context_text[:3500] if len(context_text) > 3500 else context_text
-    user_prompt = f"질문: {query}\n\n[참고 자료]\n{context_text}"
+    safe_context = context_text[:12000] if len(context_text) > 12000 else context_text
+    user_prompt = f"질문: {query}\n\n[참고 자료]\n{safe_context}"
     
     headers = {
         'Authorization': f'Bearer {NAVER_API_KEY}',
@@ -434,7 +506,7 @@ def generate_answer(query, context_text):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        "temperature": 0.1,  # 수치 계산의 정확도를 위해 낮게 유지
+        "temperature": 0.0,  # 수치 계산의 정확도를 위해 낮게 유지
         "maxTokens": 800     # 답변이 길어질 수 있으므로 토큰 여유를 조금 더 줍니다.
     }
     
@@ -452,7 +524,8 @@ def generate_answer(query, context_text):
 # 분리 이유: 아래에서 "섹션 직접 조회" 경로도 동일한 포맷을 써야 하기 때문
 # ==========================================
 def fast_rank_chunks(query, chunks, top_k=20):
-    """수천~수만 개 청크가 있을 때, 조사 제거 및 복합 키워드 교차 매칭으로 0.05초 내에 핵심 표/데이터 청크를 정확히 선별합니다."""
+    """수천~수만 개 청크가 있을 때, IDF 기반 희소 고유명사(예: '북미', '광학솔루션') 초고가중치 부여로 핵심 표/데이터 청크를 정확히 선별합니다."""
+    import math
     if len(chunks) <= top_k:
         return chunks
 
@@ -460,7 +533,8 @@ def fast_rank_chunks(query, chunks, top_k=20):
     stopwords = {
         '기준', '알려줘', '알려주세요', '얼마야', '어떻게', '대한', '관한', '에서', '으로', '보고서',
         '기준으로', '요약해', '전년', '대비', '올해', '작년', '재작년', '사업보고서', '분기보고서', '반기보고서',
-        '2023년', '2024년', '2025년', '2026년', '현대자동차', '현대차', '카카오', '삼성전자', '포스코', '네이버'
+        '2023년', '2024년', '2025년', '2026년', '현대자동차', '현대차', '카카오', '삼성전자', '포스코', '네이버',
+        '시장', '내역', '정리해', '정보', '수치', '현황'
     }
 
     keywords = set()
@@ -474,7 +548,7 @@ def fast_rank_chunks(query, chunks, top_k=20):
     if not keywords:
         return chunks[:top_k]
 
-    # 각 키워드의 문서 내 출현 빈도(문서 빈도)를 측정하여 희소 고유명사(예: '북미', '연구개발')에 초고가중치 부여
+    # 각 키워드의 문서 내 출현 빈도(DF) 측정
     kw_doc_counts = {kw: 0 for kw in keywords}
     for c in chunks:
         combined = c.get('heading_path', '') + ' ' + c.get('text', '')
@@ -483,10 +557,19 @@ def fast_rank_chunks(query, chunks, top_k=20):
                 kw_doc_counts[kw] += 1
 
     total_docs = len(chunks)
-    kw_weights = {
-        kw: max(2.0, 50.0 / (kw_doc_counts[kw] + 1)) if kw_doc_counts[kw] < total_docs * 0.05 else 1.0
-        for kw in keywords
-    }
+    kw_weights = {}
+    for kw in keywords:
+        cnt = kw_doc_counts[kw]
+        if cnt == 0:
+            kw_weights[kw] = 1.0
+        else:
+            # IDF 계산: 등장 빈도가 낮은 핵심 고유명사(예: '북미')에 높은 가중치 부여
+            idf = math.log((total_docs - cnt + 0.5) / (cnt + 0.5) + 1.0)
+            kw_weights[kw] = max(1.0, idf * 2.5)
+
+    # 질의에서 가장 희소한 핵심 키워드(예: '북미') 식별
+    valid_kws = [k for k in keywords if kw_doc_counts[k] > 0]
+    rarest_kw = min(valid_kws, key=lambda k: kw_doc_counts[k]) if valid_kws else None
 
     scored = []
     for c in chunks:
@@ -495,10 +578,12 @@ def fast_rank_chunks(query, chunks, top_k=20):
         combined = h + ' ' + t
         matched_kws = [kw for kw in keywords if kw in combined]
         if matched_kws:
-            # 매칭된 키워드 가중치 합산 + 다중 키워드 동시 출현 보너스
-            s = sum(kw_weights[kw] for kw in matched_kws) * (len(matched_kws) ** 1.5)
+            s = sum(kw_weights[kw] for kw in matched_kws) * (len(matched_kws) ** 1.2)
+            # 질의의 가장 핵심적인 희소 키워드를 포함하고 있다면 대폭 가산
+            if rarest_kw and rarest_kw in combined:
+                s *= 3.0
             if any(kw in h for kw in matched_kws):
-                s *= 2.0
+                s *= 1.5
             scored.append((s, c))
 
     if scored:
@@ -510,19 +595,26 @@ def fast_rank_chunks(query, chunks, top_k=20):
     if len(candidates) <= top_k:
         return candidates
 
-    # 2단계: 선별된 후보에 대해서만 정밀 임베딩 코사인 유사도 계산 (0.05초 소요)
-    q_vec = model.encode([query]).astype('float32')
-    sample_texts = [(c.get('heading_path', '') + ' ' + c.get('text', ''))[:400] for c in candidates]
-    c_vecs = model.encode(sample_texts, batch_size=64, show_progress_bar=False).astype('float32')
+    kw_top = candidates[:15]
+    rem = candidates[15:]
+    if rem:
+        try:
+            q_vec = model.encode([query]).astype('float32')
+            sample_texts = [(c.get('heading_path', '') + ' ' + c.get('text', ''))[:400] for c in rem]
+            c_vecs = model.encode(sample_texts, batch_size=64, show_progress_bar=False).astype('float32')
 
-    q_norm = q_vec / (np.linalg.norm(q_vec, axis=1, keepdims=True) + 1e-9)
-    c_norm = c_vecs / (np.linalg.norm(c_vecs, axis=1, keepdims=True) + 1e-9)
-    scores = np.dot(c_norm, q_norm.T).squeeze()
+            q_norm = q_vec / (np.linalg.norm(q_vec, axis=1, keepdims=True) + 1e-9)
+            c_norm = c_vecs / (np.linalg.norm(c_vecs, axis=1, keepdims=True) + 1e-9)
+            scores = np.dot(c_norm, q_norm.T).squeeze()
 
-    top_indices = np.argsort(scores)[::-1][:top_k]
-    return [candidates[i] for i in top_indices]
-
-
+            if hasattr(scores, '__len__') and len(scores) > 1:
+                top_indices = np.argsort(scores)[::-1][:(top_k - len(kw_top))]
+                return kw_top + [rem[i] for i in top_indices]
+            else:
+                return kw_top + rem[:(top_k - len(kw_top))]
+        except Exception:
+            return candidates[:top_k]
+    return candidates[:top_k]
 def format_chunk(chunk):
     text = chunk.get('text', '내용 없음')
     doc_id = chunk.get('doc_id', '')
@@ -602,7 +694,7 @@ def rag_search(query, k=20):
     target_sections = []
     target_doc_ids = []
     if target_corp:
-        target_doc_ids = find_target_doc_ids(target_corp, target_year, target_report_type)
+        target_doc_ids = find_target_doc_ids(target_corp, target_year, target_report_type, search_query)
         if not target_doc_ids:
             print(f"⚠️ [문서 조회 실패] '{target_corp} {target_year or ''} {target_report_type or ''}' 조건에 맞는 문서가 없습니다.")
         if target_doc_ids:
@@ -631,7 +723,26 @@ def rag_search(query, k=20):
     MAX_CONTEXT_CHUNKS = 20
 
     direct_chunks = []
-    if target_sections and target_doc_ids:
+    is_exchange_query = any(kw in search_query for kw in ["가이던스", "정정", "기재정정", "수시공시", "주요경영사항", "전망"])
+
+    if target_doc_ids and is_exchange_query:
+        # 수시공시(exchange) 문서는 exchange_chunk 폴더 또는 metadata에서 청크를 직접 로드
+        exchange_chunks = [c for c in metadata if c.get('doc_id') in target_doc_ids]
+        if not exchange_chunks:
+            import glob, json
+            for d in target_doc_ids:
+                r_no = d.split('_')[-1]
+                for p in glob.glob(f"exchange_chunk/{r_no}*.jsonl"):
+                    with open(p, 'r', encoding='utf-8') as ef:
+                        for el in ef:
+                            eo = json.loads(el)
+                            eo['doc_id'] = d
+                            eo['heading_path'] = eo.get('section', '')
+                            exchange_chunks.append(eo)
+        if exchange_chunks:
+            print(f"📂 [수시공시 직접 조회] {len(exchange_chunks)}개 청크 대상 고속 정밀 랭킹을 수행합니다...")
+            direct_chunks = fast_rank_chunks(search_query, exchange_chunks, MAX_CONTEXT_CHUNKS)
+    elif target_sections and target_doc_ids:
         direct_chunks = [
             c for c in metadata
             if c.get('doc_id') in target_doc_ids and c.get('heading_path') in target_sections
@@ -642,8 +753,8 @@ def rag_search(query, k=20):
                 print(f"🎯 후보 청크({len(direct_chunks)}개)가 많아 고속 2단계 선별(키워드+유사도)로 상위 {MAX_CONTEXT_CHUNKS}개를 선별합니다...")
                 direct_chunks = fast_rank_chunks(search_query, direct_chunks, MAX_CONTEXT_CHUNKS)
 
-    # 🔧 [보완] 목차 누락/변형(예: 현대차, NAVER)으로 섹션 조회가 1개 이하인 경우 -> 해당 문서 전체 청크 대상 정밀 검색 수행
-    if target_doc_ids and len(direct_chunks) <= 1:
+    # 🔧 [보완] 목차 누락/변형(예: 현대차, NAVER)으로 섹션 조회가 10개 이하인 경우 -> 해당 문서 전체 청크 대상 정밀 검색 수행
+    if target_doc_ids and not is_exchange_query and len(direct_chunks) <= 10:
         doc_chunks = [c for c in metadata if c.get('doc_id') in target_doc_ids]
         if doc_chunks and len(doc_chunks) > 1:
             print(f"🎯 문서 내 세부 섹션 미식별로 전체 {len(doc_chunks)}개 청크 대상 고속 정밀 검색을 수행합니다...")
